@@ -300,7 +300,7 @@ describe("evaluateLoan — seed edge cases", () => {
   // vintages and terms (15yr, 20yr, 30yr; originations from 2017 through 2025).
   // All have payments through the May 2026 cycle (dueDate 2026-05-01, paidOn
   // on-time). Every one should be current, no missed cycles, next due 2026-06-01,
-  // and a 100% on-time rate over the last 12 payments.
+  // and a 100% on-time rate over the last 12 months.
   // L-1020 has all payments on time through May 2026, handled separately below.
   const healthyLoans = [
     { id: "L-1009", note: "2020 origination, 30yr" },
@@ -436,72 +436,171 @@ describe("evaluateLoan — synthetic scenarios", () => {
     expect(e.status).toBe("delinquent");
   });
 
-  it("on-time rate uses only the most recent 12 payments", () => {
-    const loan = synthLoan({
-      firstDueDate: "2024-01-01",
-      termMonths: 360,
-    });
-    // 13 payments. The OLDEST by paidOn is a Jan cycle paid 14 days late
-    // (beyond grace). The next 12 are all on-time monthly payments. Sorted
-    // desc by paidOn, the late one falls outside the window and shouldn't
-    // affect the rate.
-    const payments = [{
-      id: "P-T-0",
-      loanId: loan.id,
-      amount: 1000,
-      paidOn: "2024-01-15", // 14 days past 2024-01-01 = beyond grace
-      dueDate: "2024-01-01",
-    }];
-    for (let i = 1; i < 13; i++) {
-      const month = i + 1; // 2..13 → Feb 2024 through Feb 2025
-      const year = month <= 12 ? 2024 : 2025;
-      const m = ((month - 1) % 12) + 1;
-      const due = `${year}-${String(m).padStart(2, "0")}-01`;
-      payments.push({
-        id: `P-T-${i}`,
-        loanId: loan.id,
-        amount: 1000,
-        paidOn: due,
-        dueDate: due,
-      });
+  it("missed cycles ≤ 12 months old lower the on-time rate", () => {
+    // 10 on-time payments (Jun 2025 – Mar 2026), then Apr and May 2026 missed.
+    // All 12 cycles have dueDate ≥ 2025-05-17 → inside 12-month window.
+    // Missed cycles count in denominator as not on-time: 10 on-time / 12 total = 83%.
+    const loan = synthLoan({ firstDueDate: "2025-06-01", termMonths: 24 });
+    const payments = [];
+    for (let i = 0; i < 10; i++) {
+      const d = formatDate(addMonths(parseDate("2025-06-01"), i));
+      payments.push({ id: `P-${i}`, loanId: loan.id, amount: 1000, paidOn: d, dueDate: d });
     }
-    const e = evaluateLoan(loan, payments, parseDate("2025-03-01"));
+    const e = evaluateLoan(loan, payments, TODAY);
+    expect(e.status).toBe("delinquent");
+    expect(e.onTimeRate12mo).toBeCloseTo(10 / 12, 5);
+  });
+
+  it("missed cycle older than 12 months is excluded from on-time rate denominator", () => {
+    // Jan 2025: on-time (establishes truncated-history start at Jan 2025).
+    // Feb 2025: MISSED — dueDate 2025-02-01 is > 12 months before TODAY (2026-05-17),
+    //           so it falls outside the window and must NOT lower the rate.
+    // Mar 2025 – May 2026: all on-time (15 payments).
+    // Window (dueDate ≥ 2025-05-17): Jun 2025 – May 2026, 12 cycles, all on-time → 100%.
+    const loan = synthLoan({ firstDueDate: "2025-01-01", termMonths: 24 });
+    const payments = [
+      { id: "P-0", loanId: loan.id, amount: 1000, paidOn: "2025-01-01", dueDate: "2025-01-01" },
+      // Feb 2025 intentionally omitted — missed
+    ];
+    for (let i = 2; i <= 16; i++) {
+      const d = formatDate(addMonths(parseDate("2025-01-01"), i));
+      payments.push({ id: `P-${i}`, loanId: loan.id, amount: 1000, paidOn: d, dueDate: d });
+    }
+    const e = evaluateLoan(loan, payments, TODAY);
+    // Feb 2025 missed but dueDate > 12 months ago → excluded from denominator; rate unaffected.
     expect(e.onTimeRate12mo).toBe(1);
   });
 
-  it("two partials summing to full payment → current (cumulative coverage)", () => {
-    // Verifies the multi-partial rule: if coverage.get(dueDate).total ≥ monthlyPayment
-    // the status should flip from late to current even though both payments are "partial".
-    const loan = synthLoan({
-      firstDueDate: "2026-04-01",
-      termMonths: 12,
-      maturityDate: "2027-03-01",
-    });
+  it("on-time rate window is last 12 months by dueDate — cycles before window excluded", () => {
+    // Jun 2024 cycle: 14 days late (past grace) but dueDate 2024-06-01 is outside the
+    // 12-month window (window start ≈ 2025-05-17). Jul 2024 – May 2026: all on-time.
+    // Only the 12 cycles with dueDate ≥ 2025-05-17 are counted → rate = 100%.
+    const loan = synthLoan({ firstDueDate: "2024-06-01", termMonths: 360 });
     const payments = [
-      { id: "P-1", loanId: loan.id, amount: 600, paidOn: "2026-04-01", dueDate: "2026-04-01" },
-      { id: "P-2", loanId: loan.id, amount: 400, paidOn: "2026-04-15", dueDate: "2026-04-01" },
+      { id: "P-0", loanId: loan.id, amount: 1000, paidOn: "2024-06-15", dueDate: "2024-06-01" },
+    ];
+    for (let i = 1; i <= 23; i++) {
+      const d = formatDate(addMonths(parseDate("2024-06-01"), i));
+      payments.push({ id: `P-${i}`, loanId: loan.id, amount: 1000, paidOn: d, dueDate: d });
+    }
+    const e = evaluateLoan(loan, payments, TODAY);
+    expect(e.onTimeRate12mo).toBe(1); // Jun 2024 cycle outside window; 12 in-window all on-time
+  });
+
+  it("lump sum on a single day totalling ≥ 12 × monthlyPayment resets on-time rate to 100%", () => {
+    // Delinquent loan: 10 on-time (Jun 2025 – Mar 2026) + Apr and May 2026 missed.
+    // Without the lump sum, rate = 10/12 ≈ 83%.
+    // A lump sum recorded May 17 covering Apr 2026 – Mar 2027 (12 records, same paidOn,
+    // total = 12 × monthlyPayment) triggers the override → rate = 100%.
+    const loan = synthLoan({ firstDueDate: "2025-06-01", termMonths: 24 });
+    const payments = [];
+    for (let i = 0; i < 10; i++) {
+      const d = formatDate(addMonths(parseDate("2025-06-01"), i));
+      payments.push({ id: `P-${i}`, loanId: loan.id, amount: 1000, paidOn: d, dueDate: d });
+    }
+    // Lump-sum split: 12 records on May 17, covering Apr 2026 through Mar 2027.
+    for (let i = 0; i < 12; i++) {
+      const due = formatDate(addMonths(parseDate("2026-04-01"), i));
+      payments.push({ id: `LS-${i}`, loanId: loan.id, amount: 1000, paidOn: "2026-05-17", dueDate: due });
+    }
+    const e = evaluateLoan(loan, payments, TODAY);
+    expect(e.onTimeRate12mo).toBe(1); // total on May 17 = 12 × monthlyPayment → 100%
+  });
+
+  it("partial payment in last 12 months lowers on-time rate", () => {
+    // 11 full on-time payments + 1 partial (never reaches full coverage).
+    // All 12 cycles have dueDate in the last 12 months → denominator = 12.
+    // Partial cycle: cumulative total never reaches monthlyPayment → NOT on-time.
+    const loan = synthLoan({ firstDueDate: "2025-06-01", termMonths: 24 });
+    const payments = [];
+    for (let i = 0; i < 11; i++) {
+      const d = formatDate(addMonths(parseDate("2025-06-01"), i));
+      payments.push({ id: `P-${i}`, loanId: loan.id, amount: 1000, paidOn: d, dueDate: d });
+    }
+    payments.push({ id: "P-partial", loanId: loan.id, amount: 600, paidOn: "2026-05-01", dueDate: "2026-05-01" });
+    const e = evaluateLoan(loan, payments, TODAY);
+    expect(e.lastPaymentStatus.classification).toBe("partial");
+    expect(e.onTimeRate12mo).toBeCloseTo(11 / 12, 5);
+  });
+
+  // ---- lump sum (multi-cycle split) ----
+
+  it("lump sum paid on time: split records share paidOn; each cycle graded on paidOn vs its dueDate", () => {
+    // Routes.js split: one payment covers Apr (due Apr 1) and pre-pays May (due May 1).
+    // Both records have paidOn=Apr 1. Apr: 0d late → on-time. May: 30d early → on-time.
+    const loan = synthLoan({ firstDueDate: "2026-04-01", termMonths: 12, maturityDate: "2027-03-01" });
+    const payments = [
+      { id: "P-1", loanId: loan.id, amount: 1000, paidOn: "2026-04-01", dueDate: "2026-04-01" },
+      { id: "P-2", loanId: loan.id, amount: 1000, paidOn: "2026-04-01", dueDate: "2026-05-01" },
     ];
     const e = evaluateLoan(loan, payments, TODAY);
     expect(e.status).toBe("current");
+    expect(e.onTimeRate12mo).toBe(1); // 2 of 2 on-time
+  });
+
+  it("late lump sum: each split cycle graded independently — both past grace → 0%", () => {
+    // Delinquent borrower pays Apr+May late on May 17. Routes.js split: same paidOn=May 17.
+    // Apr: 46d late → NOT on-time. May: 16d late → NOT on-time.
+    const loan = synthLoan({ firstDueDate: "2026-04-01", termMonths: 12, maturityDate: "2027-03-01" });
+    const payments = [
+      { id: "P-1", loanId: loan.id, amount: 1000, paidOn: "2026-05-17", dueDate: "2026-04-01" },
+      { id: "P-2", loanId: loan.id, amount: 1000, paidOn: "2026-05-17", dueDate: "2026-05-01" },
+    ];
+    const e = evaluateLoan(loan, payments, TODAY);
+    expect(e.status).toBe("current");
+    expect(e.onTimeRate12mo).toBe(0); // 0 of 2 on-time
+  });
+
+  it("completing payment within grace counts as on-time (cumulative rule)", () => {
+    // 9 full on-time payments, then a partial on May 1, then a completing payment
+    // on May 5 (4 days late — within GRACE_DAYS). Cumulative total reaches
+    // monthlyPayment on May 5, which is within grace → cycle IS on-time → 10/10.
+    const loan = synthLoan({ firstDueDate: "2025-08-01", termMonths: 24 });
+    const payments = [];
+    for (let i = 0; i < 9; i++) {
+      const d = formatDate(addMonths(parseDate("2025-08-01"), i));
+      payments.push({ id: `P-${i}`, loanId: loan.id, amount: 1000, paidOn: d, dueDate: d });
+    }
+    payments.push({ id: "P-partial",    loanId: loan.id, amount: 600, paidOn: "2026-05-01", dueDate: "2026-05-01" });
+    payments.push({ id: "P-completing", loanId: loan.id, amount: 400, paidOn: "2026-05-05", dueDate: "2026-05-01" });
+    const e = evaluateLoan(loan, payments, TODAY);
+    expect(e.status).toBe("current");
     expect(e.missedCycles).toBe(0);
+    expect(e.onTimeRate12mo).toBeCloseTo(10 / 10, 5);
+  });
+
+  it("completing payment past grace does NOT fix on-time rate", () => {
+    // April cycle: partial ($600) on Apr 1, completing ($400) on Apr 22 (21 days late,
+    // past GRACE_DAYS). Cumulative reaches $1000 on Apr 22 → NOT on-time.
+    // May cycle: full on-time payment. Two cycles in window → rate = 1/2.
+    const loan = synthLoan({ firstDueDate: "2026-04-01", termMonths: 12, maturityDate: "2027-03-01" });
+    const payments = [
+      { id: "P-partial",    loanId: loan.id, amount: 600,  paidOn: "2026-04-01", dueDate: "2026-04-01" },
+      { id: "P-completing", loanId: loan.id, amount: 400,  paidOn: "2026-04-22", dueDate: "2026-04-01" },
+      { id: "P-may",        loanId: loan.id, amount: 1000, paidOn: "2026-05-01", dueDate: "2026-05-01" },
+    ];
+    const e = evaluateLoan(loan, payments, TODAY);
+    expect(e.onTimeRate12mo).toBeCloseTo(1 / 2, 5); // Apr completed 21d late → not on-time; May on-time
   });
 
   it("two partials NOT summing to full payment → late (still short)", () => {
+    // Use May 1 as first due date so it is the only evaluated past cycle (TODAY = May 17).
     const loan = synthLoan({
-      firstDueDate: "2026-04-01",
+      firstDueDate: "2026-05-01",
       termMonths: 12,
-      maturityDate: "2027-03-01",
+      maturityDate: "2027-04-01",
     });
     const payments = [
-      { id: "P-1", loanId: loan.id, amount: 400, paidOn: "2026-04-01", dueDate: "2026-04-01" },
-      { id: "P-2", loanId: loan.id, amount: 400, paidOn: "2026-04-15", dueDate: "2026-04-01" },
+      { id: "P-1", loanId: loan.id, amount: 400, paidOn: "2026-05-01", dueDate: "2026-05-01" },
+      { id: "P-2", loanId: loan.id, amount: 400, paidOn: "2026-05-15", dueDate: "2026-05-01" },
     ];
-    // 800 of 1000 — still partial, due date 16d ago (past grace) → late
+    // 800 of 1000 — still partial; first payment was on time (within grace) so the cycle is
+    // covered for missed-cycle purposes, but the last payment is partial 16d past due → late.
+    // firstUncovered is null; nextDueDate advances to the next future unpaid cycle (Jun 1).
     const e = evaluateLoan(loan, payments, TODAY);
     expect(e.status).toBe("late");
     expect(e.missedCycles).toBe(0);
-    // Due date stays pinned to the partial cycle — NOT advanced yet.
-    expect(e.nextDueDate).toBe("2026-04-01");
+    expect(e.nextDueDate).toBe("2026-06-01");
   });
 
   it("cumulative partials cover cycle → nextDueDate advances to the NEXT cycle", () => {
@@ -509,20 +608,21 @@ describe("evaluateLoan — synthetic scenarios", () => {
     // the loan flips to "current" and nextDueDate must advance past that cycle
     // to the next scheduled billing date — verifying the due-date-lock can be
     // released on the frontend.
+    // Use May 1 as first due date so it is the only evaluated past cycle (TODAY = May 17).
     const loan = synthLoan({
-      firstDueDate: "2026-04-01",
+      firstDueDate: "2026-05-01",
       termMonths: 12,
-      maturityDate: "2027-03-01",
+      maturityDate: "2027-04-01",
     });
     const payments = [
-      { id: "P-1", loanId: loan.id, amount: 600, paidOn: "2026-04-01", dueDate: "2026-04-01" },
-      { id: "P-2", loanId: loan.id, amount: 400, paidOn: "2026-04-15", dueDate: "2026-04-01" },
+      { id: "P-1", loanId: loan.id, amount: 600, paidOn: "2026-05-01", dueDate: "2026-05-01" },
+      { id: "P-2", loanId: loan.id, amount: 400, paidOn: "2026-05-15", dueDate: "2026-05-01" },
     ];
-    // 1000 of 1000 — fully covered, status current, next cycle is May 1.
+    // 1000 of 1000 — fully covered, status current, next future unpaid cycle is Jun 1.
     const e = evaluateLoan(loan, payments, TODAY);
     expect(e.status).toBe("current");
     expect(e.missedCycles).toBe(0);
-    expect(e.nextDueDate).toBe("2026-05-01"); // advanced past the partial's dueDate
+    expect(e.nextDueDate).toBe("2026-06-01"); // advanced past the covered cycle
   });
 
   // ---- overpayment redistribution ----
@@ -552,7 +652,7 @@ describe("evaluateLoan — synthetic scenarios", () => {
   });
 
   it("large overpayment chains across multiple cycles", () => {
-    // $3500 on a $1000/mo loan covers April, May, and part of June.
+    // $3500 on a $1000/mo loan covers April, May, and June fully, partial July.
     const loan = synthLoan({
       firstDueDate: "2026-04-01",
       termMonths: 12,
@@ -567,15 +667,13 @@ describe("evaluateLoan — synthetic scenarios", () => {
         dueDate: "2026-04-01",
       },
     ];
-    // April covered (1000), May covered (1000), June partial (1500 → short 500)
-    // but May is in the future (today = 2026-05-17), so only April is evaluated.
-    // After redistribution: April=1000, May=1000 (covers fully), June=1500 (partial).
-    // May's due date passed (2026-05-01 is 16d ago)... wait, May IS evaluated.
-    // evaluated cycles: Apr (past), May (past). Both covered. nextDueDate = June.
+    // After redistribution: April=1000, May=1000, June=1000, July=500 (partial).
+    // Evaluated cycles (≤ May 17): April (covered) and May (covered) → missedCycles = 0.
+    // First future unpaid cycle: June is fully covered (skip), July is partial → nextDueDate = July.
     const e = evaluateLoan(loan, payments, TODAY);
     expect(e.status).toBe("current");
     expect(e.missedCycles).toBe(0);
-    expect(e.nextDueDate).toBe("2026-06-01");
+    expect(e.nextDueDate).toBe("2026-07-01");
   });
 
   it("overpayment does not spill past the last scheduled cycle", () => {

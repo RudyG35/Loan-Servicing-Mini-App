@@ -1,7 +1,7 @@
 // Pure-Node smoke test for the evaluation rules. No npm deps required.
 // Run: node smoke-test.js
 
-import { evaluateLoan, parseDate } from "./src/evaluation.js";
+import { evaluateLoan, parseDate, addMonths, formatDate } from "./src/evaluation.js";
 import { loans, getPaymentsForLoan, addPayment } from "./src/data.js";
 
 const today = parseDate("2026-05-17");
@@ -114,6 +114,16 @@ if (e1006after.nextDueDate === partialDueDate) {
   console.log(`FAIL: nextDueDate still pinned to partial's dueDate (${partialDueDate}) — should have advanced`);
   failures++;
 }
+// On-time rate must NOT improve after the completing payment: the completing
+// payment (paidOn May 17) arrived well past grace for L-1006's partial cycle,
+// so the cumulative total was reached late — the cycle is not on-time.
+const rateAfter = e1006after.onTimeRate12mo;
+const rateBefore = e1006before.onTimeRate12mo;
+console.log(`onTime12mo: before=${(rateBefore * 100).toFixed(0)}%  after=${(rateAfter * 100).toFixed(0)}%  (should be equal)`);
+if (rateAfter !== rateBefore) {
+  console.log(`FAIL: on-time rate changed from ${(rateBefore * 100).toFixed(0)}% to ${(rateAfter * 100).toFixed(0)}% after completing payment — should be unchanged`);
+  failures++;
+}
 
 console.log("\n--- multi-cycle overpayment split flow on L-1003 ---");
 // L-1003 is delinquent with April + May missed. Simulate the POST handler's
@@ -144,6 +154,55 @@ if (eOver.missedCycles !== 0) {
   console.log(`FAIL: expected 0 missed cycles, got ${eOver.missedCycles}`);
   failures++;
 }
+
+// --- on-time rate: lump sum grading ---
+// Uses evaluateLoan directly with isolated synthetic data (no addPayment).
+console.log("\n--- on-time rate: lump sum grading ---");
+
+const otLoan = {
+  id: "OT-TEST", borrowerName: "Test", principal: 120000, annualRate: 0.06,
+  termMonths: 12, monthlyPayment: 1000, originationDate: "2026-03-01",
+  firstDueDate: "2026-04-01", maturityDate: "2027-03-01",
+};
+
+// Case A: lump sum paid Apr 1 covering Apr + pre-paying May.
+// Apr (paidOn=Apr 1, dueDate=Apr 1): 0d late → on-time.
+// May (paidOn=Apr 1, dueDate=May 1): 30d early → on-time. → 100%
+const eLsOnTime = evaluateLoan(otLoan, [
+  { id: "OT-1", loanId: "OT-TEST", amount: 1000, paidOn: "2026-04-01", dueDate: "2026-04-01" },
+  { id: "OT-2", loanId: "OT-TEST", amount: 1000, paidOn: "2026-04-01", dueDate: "2026-05-01" },
+], today);
+console.log(`lump sum on time:   onTime12mo=${(eLsOnTime.onTimeRate12mo * 100).toFixed(0)}%  (expected 100%)`);
+if (eLsOnTime.onTimeRate12mo !== 1) { console.log("FAIL"); failures++; }
+
+// Case B: late lump sum paid May 17 covering Apr+May — both past grace, total < 12mo → 0%
+const eLsLate = evaluateLoan(otLoan, [
+  { id: "OT-3", loanId: "OT-TEST", amount: 1000, paidOn: "2026-05-17", dueDate: "2026-04-01" },
+  { id: "OT-4", loanId: "OT-TEST", amount: 1000, paidOn: "2026-05-17", dueDate: "2026-05-01" },
+], today);
+console.log(`late lump sum:      onTime12mo=${(eLsLate.onTimeRate12mo * 100).toFixed(0)}%  (expected 0%)`);
+if (eLsLate.onTimeRate12mo !== 0) { console.log("FAIL"); failures++; }
+
+// Case C: delinquent loan + lump sum ≥ 12 × monthlyPayment on one day → 100%
+// 10 on-time + 2 missed (Apr/May) → normally 83%. A 12-record split on May 17
+// (total = 12 × 1000) triggers the lump-sum override → rate = 100%.
+const lsDelinquentLoan = {
+  id: "LS-DLQ", borrowerName: "Test", principal: 120000, annualRate: 0.06,
+  termMonths: 24, monthlyPayment: 1000, originationDate: "2025-05-01",
+  firstDueDate: "2025-06-01", maturityDate: "2027-05-01",
+};
+const lsDelinquentPayments = [];
+for (let i = 0; i < 10; i++) {
+  const d = formatDate(addMonths(parseDate("2025-06-01"), i));
+  lsDelinquentPayments.push({ id: `DLQ-OT-${i}`, loanId: "LS-DLQ", amount: 1000, paidOn: d, dueDate: d });
+}
+for (let i = 0; i < 12; i++) {
+  const due = formatDate(addMonths(parseDate("2026-04-01"), i));
+  lsDelinquentPayments.push({ id: `DLQ-LS-${i}`, loanId: "LS-DLQ", amount: 1000, paidOn: "2026-05-17", dueDate: due });
+}
+const eLsDelinquent = evaluateLoan(lsDelinquentLoan, lsDelinquentPayments, today);
+console.log(`lump sum ≥12mo:     onTime12mo=${(eLsDelinquent.onTimeRate12mo * 100).toFixed(0)}%  (expected 100%)`);
+if (eLsDelinquent.onTimeRate12mo !== 1) { console.log("FAIL"); failures++; }
 
 console.log(`\n${failures === 0 ? "All checks passed." : failures + " failure(s)."}`);
 process.exit(failures === 0 ? 0 : 1);

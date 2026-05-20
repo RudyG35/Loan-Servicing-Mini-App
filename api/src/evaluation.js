@@ -32,6 +32,16 @@
 //                           that has already been fully paid (e.g. via overpayment
 //                           split), pointing the form to the first genuinely unpaid
 //                           upcoming cycle.
+//
+//   On-time rate            Window: evaluated cycles with dueDate ≥ today − 12 months.
+//                           Missed cycles ≤ 12 months old count in the denominator as
+//                           not on-time; missed cycles > 12 months old are excluded.
+//                           A cycle is on time when the cumulative total first reaches
+//                           monthlyPayment within GRACE_DAYS of the due date.
+//                           A completing payment past grace leaves the cycle not on-time.
+//                           Lump-sum override: if any single paidOn date has total
+//                           payments ≥ 12 × monthlyPayment, rate resets to 100%.
+//                           Returns null when no evaluated cycles fall in the window.
 
 export const GRACE_DAYS = 10;
 const COVERAGE_TOLERANCE = 0.01; // dollars — rounding tolerance throughout
@@ -241,11 +251,66 @@ export function evaluateLoan(loan, payments, today = new Date()) {
   const sortedDesc = [...payments].sort((a, b) =>
     a.paidOn < b.paidOn ? 1 : a.paidOn > b.paidOn ? -1 : 0,
   );
-  const last12 = sortedDesc.slice(0, 12);
-  const onTimeCount = last12.filter(
-    (p) => daysBetween(parseDate(p.dueDate), parseDate(p.paidOn)) <= GRACE_DAYS,
-  ).length;
-  const onTimeRate12mo = last12.length === 0 ? null : onTimeCount / last12.length;
+
+  // On-time rate: share of evaluated cycles whose dueDate falls in the last 12 months
+  // that were paid in full within GRACE_DAYS of the due date.
+  //
+  // Denominator: evaluated cycles (respects truncated-history guard) with dueDate ≥ today − 12 months.
+  //   · Missed cycles with dueDate ≤ 12 months ago → included; counted as NOT on-time.
+  //   · Missed cycles with dueDate > 12 months ago → excluded from denominator entirely.
+  //   · Cycles with payments are graded on cumulative coverage and timing (see below).
+  // A cycle is on-time when the cumulative total for that dueDate first reaches
+  // monthlyPayment, and the payment that completed coverage arrived within GRACE_DAYS.
+  // Partial payments accumulate; a completing payment within grace makes the cycle on-time.
+  // A completing payment past grace leaves the cycle not on-time.
+  // Lump-sum override: if any single paidOn date has total payments ≥ 12 × monthlyPayment,
+  // the rate is immediately set to 100% — the large prepayment resets the borrower's standing.
+  // Returns null when no evaluated cycles fall within the window.
+
+  // Build payment index by dueDate sorted by paidOn for on-time grading.
+  const paymentsByDueDate = new Map();
+  for (const p of payments) {
+    const list = paymentsByDueDate.get(p.dueDate) ?? [];
+    list.push(p);
+    paymentsByDueDate.set(p.dueDate, list);
+  }
+  for (const list of paymentsByDueDate.values()) {
+    list.sort((a, b) => (a.paidOn < b.paidOn ? -1 : a.paidOn > b.paidOn ? 1 : 0));
+  }
+
+  const twelveMonthsAgo = addMonths(todayUtc, -12);
+  const recentEvaluatedCycles = evaluatedCycles.filter(d => d >= twelveMonthsAgo);
+
+  const onTimeCount12mo = recentEvaluatedCycles.filter(d => {
+    const pmts = paymentsByDueDate.get(formatDate(d));
+    if (!pmts) return false; // missed cycle → not on-time
+    // Walk payments in paidOn order; cycle is on-time when cumulative first reaches
+    // monthlyPayment and the completing payment was within GRACE_DAYS of the due date.
+    let running = 0;
+    for (const p of pmts) {
+      running += p.amount;
+      if (running + COVERAGE_TOLERANCE >= loan.monthlyPayment) {
+        return daysBetween(d, parseDate(p.paidOn)) <= GRACE_DAYS;
+      }
+    }
+    return false; // full coverage never reached
+  }).length;
+
+  // Lump-sum override: if any single paidOn date has total payments ≥ 12 × monthlyPayment,
+  // the borrower has pre-paid at least a full year in one transaction — rate resets to 100%.
+  const totalByDate = new Map();
+  for (const p of payments) {
+    totalByDate.set(p.paidOn, (totalByDate.get(p.paidOn) ?? 0) + p.amount);
+  }
+  const lumpSumCovers12Months = [...totalByDate.values()].some(
+    t => t + COVERAGE_TOLERANCE >= 12 * loan.monthlyPayment,
+  );
+
+  const onTimeRate12mo = lumpSumCovers12Months
+    ? 1
+    : recentEvaluatedCycles.length === 0
+      ? null
+      : onTimeCount12mo / recentEvaluatedCycles.length;
 
   const lastPayment       = sortedDesc[0] || null;
   const lastPaymentStatus = lastPayment ? classifyPayment(lastPayment, loan) : null;
@@ -360,7 +425,7 @@ function buildSummary({
 }) {
   const name = loan.borrowerName;
   const pct  = onTimeRate12mo == null ? null : Math.round(onTimeRate12mo * 100);
-  const rate = pct == null ? "no recent payments" : `${pct}% on-time over last 12`;
+  const rate = pct == null ? "no recent payments" : `${pct}% on-time over last 12 months`;
 
   if (status === "paid_off") {
     return earlyPayoff
