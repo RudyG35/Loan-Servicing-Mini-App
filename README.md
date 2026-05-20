@@ -55,7 +55,7 @@ The API loads `seed-data.json` at startup and keeps all data in memory. Payments
 
 ## Running the Frontend
 
-Open a second terminal, leaving the API running in the first:
+Open a **second terminal**, leaving the API running in the first:
 
 ```bash
 cd web
