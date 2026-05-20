@@ -56,6 +56,28 @@ curl http://127.0.0.1:3001/health
 
 The API loads `seed-data.json` at startup and keeps all data in memory. Payments recorded during a session reset on restart.
 
+### Logs
+
+The API writes structured JSON logs to both the terminal and `api/logs/app.log`. The file is created automatically on first start.
+
+To follow the log in real time:
+
+```bash
+tail -f api/logs/app.log
+```
+
+To read it in a more human-friendly format (requires `jq`):
+
+```bash
+tail -f api/logs/app.log | jq '{time: .time, level: .levelName, msg: .msg}'
+```
+
+Log level defaults to `info`. To see debug-level output:
+
+```bash
+LOG_LEVEL=debug npm start
+```
+
 ---
 
 ## Running the Frontend
@@ -148,4 +170,3 @@ curl "http://127.0.0.1:3001/loans/L-1003/evaluation" | jq .
 
 # Reproduce seed behavior at the authored date
 curl "http://127.0.0.1:3001/loans?asOf=2026-05-15" | jq '.[0:4]'
-

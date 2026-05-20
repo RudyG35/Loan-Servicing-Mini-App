@@ -53,7 +53,10 @@ export default async function routes(fastify) {
   // GET /loans/:id — full loan detail.
   fastify.get("/loans/:id", async (req, reply) => {
     const loan = getLoan(req.params.id);
-    if (!loan) return reply.code(404).send({ error: "loan not found" });
+    if (!loan) {
+      req.log.warn({ loanId: req.params.id }, "loan not found");
+      return reply.code(404).send({ error: "loan not found" });
+    }
 
     const today = resolveToday(req);
     const ps = getPaymentsForLoan(loan.id);
@@ -73,7 +76,10 @@ export default async function routes(fastify) {
   // GET /loans/:id/payments — history, newest first, each tagged with classification.
   fastify.get("/loans/:id/payments", async (req, reply) => {
     const loan = getLoan(req.params.id);
-    if (!loan) return reply.code(404).send({ error: "loan not found" });
+    if (!loan) {
+      req.log.warn({ loanId: req.params.id }, "loan not found");
+      return reply.code(404).send({ error: "loan not found" });
+    }
 
     const ps = getPaymentsForLoan(loan.id);
 
@@ -96,13 +102,17 @@ export default async function routes(fastify) {
   // body: { amount: number, paidOn: "YYYY-MM-DD", dueDate?: "YYYY-MM-DD" }
   fastify.post("/loans/:id/payments", async (req, reply) => {
     const loan = getLoan(req.params.id);
-    if (!loan) return reply.code(404).send({ error: "loan not found" });
+    if (!loan) {
+      req.log.warn({ loanId: req.params.id }, "loan not found");
+      return reply.code(404).send({ error: "loan not found" });
+    }
 
     // Block payments on fully paid-off loans.
     const today = resolveToday(req);
     const psCheck = getPaymentsForLoan(loan.id);
     const evalCheck = evaluateLoan(loan, psCheck, today);
     if (evalCheck.status === "paid_off") {
+      req.log.warn({ loanId: loan.id }, "payment rejected — loan is paid off");
       return reply.code(422).send({
         error: "Cannot record a payment — this loan is already paid off.",
       });
@@ -114,12 +124,15 @@ export default async function routes(fastify) {
     let dueDate = body.dueDate;
 
     if (!Number.isFinite(amount) || amount <= 0) {
+      req.log.warn({ loanId: loan.id, amount: body.amount }, "payment rejected — invalid amount");
       return reply.code(400).send({ error: "amount must be a positive number" });
     }
     if (!/^\d{4}-\d{2}-\d{2}$/.test(paidOn ?? "")) {
+      req.log.warn({ loanId: loan.id, paidOn }, "payment rejected — invalid paidOn date");
       return reply.code(400).send({ error: "paidOn must be YYYY-MM-DD" });
     }
     if (dueDate && !/^\d{4}-\d{2}-\d{2}$/.test(dueDate)) {
+      req.log.warn({ loanId: loan.id, dueDate }, "payment rejected — invalid dueDate");
       return reply.code(400).send({ error: "dueDate must be YYYY-MM-DD" });
     }
 
@@ -134,6 +147,10 @@ export default async function routes(fastify) {
     if (overpayment > COVERAGE_TOLERANCE) {
       // Payment exceeds the remaining balance — reject so the CSR can correct
       // the amount before recording. Return 422 with the exact overage.
+      req.log.warn(
+        { loanId: loan.id, amount, currentBalance: Math.round(currentBalance * 100) / 100, overpayment },
+        "payment rejected — amount exceeds remaining balance",
+      );
       return reply.code(422).send({
         error: "Error: Payment exceeds remaining balance.",
         overpayment,
@@ -190,6 +207,19 @@ export default async function routes(fastify) {
     const ps = getPaymentsForLoan(loan.id);
     const evalResult = evaluateLoan(loan, ps, today);
 
+    req.log.info(
+      {
+        loanId: loan.id,
+        amount,
+        paidOn,
+        dueDate: record.dueDate,
+        cycles: records.length,
+        classification: classification.classification,
+        status: evalResult.status,
+      },
+      "payment recorded",
+    );
+
     const response = {
       payment: { ...record, ...classification },
       evaluation: evalResult,
@@ -211,7 +241,10 @@ export default async function routes(fastify) {
   // GET /loans/:id/evaluation — status / days past due / on-time rate / summary.
   fastify.get("/loans/:id/evaluation", async (req, reply) => {
     const loan = getLoan(req.params.id);
-    if (!loan) return reply.code(404).send({ error: "loan not found" });
+    if (!loan) {
+      req.log.warn({ loanId: req.params.id }, "loan not found");
+      return reply.code(404).send({ error: "loan not found" });
+    }
 
     const today = resolveToday(req);
     const ps = getPaymentsForLoan(loan.id);
