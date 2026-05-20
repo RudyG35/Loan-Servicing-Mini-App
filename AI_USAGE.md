@@ -14,4 +14,4 @@ The most useful interaction was asking Claude to derive the data models and API 
 
 ## Most Frustrating Interaction
 
-The most frustrating interaction was calculating the on time ratio based on last 12 months. It took multiple interactions and some debugging to figure out why the calculations were incorrect for loan status deliquent only. Overall this was a good learning experience to know exactly how to format/calculate exactly what is needed in the CSR console and to tell Claude exactly what is expected/needed.
+The most frustrating interaction was calculating the on time ratio based on last 12 months. It took multiple interactions and some debugging to figure out why the calculations were incorrect for loan status deliquent only. Overall this was a good learning experience to know exactly how to format/calculate exactly what is needed in the CSR console and to tell Claude exactly what is expected/needed. 
